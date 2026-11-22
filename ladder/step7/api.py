@@ -7,16 +7,20 @@ Run (from the repository root): docker compose up --build
 """
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
 import redis
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse, Response
-from sqlalchemy import select
+from sqlalchemy import cast, func, select
+from sqlalchemy.dialects.postgresql import JSONB
 
 from app.config import settings
-from app.db.models import Batch, Document, DocStatus, PackStatus, ReviewAction, ShipmentPack
+from app.db.models import Batch, Document, DocStatus, Extraction, LLMCall, PackStatus, ReviewAction, ShipmentPack
 from app.ingestion.storage import get_storage, raw_path
 from app.observability.logging import configure_logging, get_logger
-from app.observability.metrics import setup_metrics
+from app.observability.metrics import register_activity_gauges, register_queue_gauge, register_status_gauges, setup_metrics
 
 from common import fingerprint
 from db import init_db, session_scope
@@ -31,10 +35,87 @@ ROLES = {"ap_executive": 0, "finance_manager": 1}  # higher may approve anything
 QUEUES = ["reader.urgent", "reader.normal", "reader.bulk", "agent.urgent", "agent.normal", "agent.bulk"]
 
 
+# --- gauges the Grafana dashboard reads (same readers as main's app/api/main.py) -------------------
+def queue_lengths_for_metrics() -> dict[str, int]:
+    return {q: int(_redis.llen(q)) for q in QUEUES}
+
+
+def status_counts(model, statuses) -> dict[str, int]:
+    """Every status is reported, so one that empties drops to 0 instead of vanishing."""
+    with session_scope() as s:
+        counts = dict(s.execute(select(model.status, func.count()).group_by(model.status)).all())
+    return {st.value: counts.get(st, 0) for st in statuses}
+
+
+def ai_spend() -> Decimal:
+    with session_scope() as s:
+        return s.scalar(select(func.coalesce(func.sum(LLMCall.cost_usd), 0)))
+
+
+def injection_documents() -> int:
+    with session_scope() as s:
+        return s.scalar(select(func.count()).select_from(Document).where(
+            cast(Document.flags, JSONB).contains(["possible_injection"]), Document.status != DocStatus.split))
+
+
+RATE_MINUTES = 5  # "per minute" panels average over this window
+ROUTES = ("auto_approve", "investigate", "human_review")
+
+
+def _since(**window) -> datetime:
+    return datetime.now(UTC) - timedelta(**window)
+
+
+def documents_per_minute() -> dict[str, float]:
+    since = _since(minutes=RATE_MINUTES)
+    with session_scope() as s:
+        extracted = s.scalar(select(func.count()).select_from(Extraction).where(Extraction.created_at >= since))
+        failed = s.scalar(select(func.count()).select_from(Document).where(
+            Document.status == DocStatus.failed, Document.updated_at >= since))
+    return {"extracted": extracted / RATE_MINUTES, "failed": failed / RATE_MINUTES}
+
+
+def packs_routed_last_hour() -> dict[str, int]:
+    with session_scope() as s:
+        counts = dict(s.execute(select(ShipmentPack.route, func.count()).where(
+            ShipmentPack.created_at >= _since(hours=1), ShipmentPack.route.isnot(None), ShipmentPack.route != "wait")
+            .group_by(ShipmentPack.route)).all())
+    return {**dict.fromkeys(ROUTES, 0), **counts}
+
+
+def ai_spend_last_hour_by_agent() -> dict[str, Decimal]:
+    with session_scope() as s:
+        return dict(s.execute(select(LLMCall.agent, func.sum(LLMCall.cost_usd))
+                              .where(LLMCall.created_at >= _since(hours=1)).group_by(LLMCall.agent)).all())
+
+
+def tokens_per_minute() -> dict[str, float]:
+    with session_scope() as s:
+        tokens_in, tokens_out = s.execute(
+            select(func.coalesce(func.sum(LLMCall.input_tokens), 0), func.coalesce(func.sum(LLMCall.output_tokens), 0))
+            .where(LLMCall.created_at >= _since(minutes=RATE_MINUTES))).one()
+    return {"input": tokens_in / RATE_MINUTES, "output": tokens_out / RATE_MINUTES}
+
+
+def llm_latency_p95() -> dict[str, float]:
+    with session_scope() as s:
+        rows = s.execute(select(LLMCall.model, func.percentile_cont(0.95).within_group(LLMCall.latency_ms))
+                         .where(LLMCall.created_at >= _since(minutes=RATE_MINUTES)).group_by(LLMCall.model)).all()
+    return {model: ms / 1000 for model, ms in rows}
+
+
+
 @app.on_event("startup")
 def _startup() -> None:
     configure_logging()
     setup_metrics(start_http_server=False)  # this process serves /metrics itself, below
+    register_queue_gauge(queue_lengths_for_metrics)
+    register_status_gauges(documents=lambda: status_counts(Document, DocStatus),
+                           packs=lambda: status_counts(ShipmentPack, PackStatus), spend=ai_spend,
+                           injections=injection_documents)
+    register_activity_gauges(documents_per_minute=documents_per_minute, packs_routed=packs_routed_last_hour,
+                             spend_by_agent=ai_spend_last_hour_by_agent, tokens_per_minute=tokens_per_minute,
+                             latency_p95=llm_latency_p95)
     init_db()
     log.info("api startup")
 
