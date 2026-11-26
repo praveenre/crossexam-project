@@ -58,7 +58,13 @@ def get_chat_model(tier_or_name: str = "mid", **kwargs: Any) -> BaseChatModel:
     if provider == "openai":
         from langchain_openai import ChatOpenAI
 
-        return ChatOpenAI(model=name, api_key=settings.openai_api_key or None, max_retries=0, **kwargs)
+        return ChatOpenAI(
+            model=name,
+            api_key=settings.openai_api_key or None,
+            base_url=settings.openai_base_url or None,
+            max_retries=0,
+            **kwargs,
+        )
     raise ValueError(f"Unknown LLM_PROVIDER {provider}")
 
 
@@ -99,8 +105,12 @@ def embed_text(text: str) -> list[float] | None:
         else:
             from langchain_openai import OpenAIEmbeddings
 
-            vec = OpenAIEmbeddings(model="text-embedding-3-small", dimensions=settings.embedding_dim,
-                                   api_key=settings.openai_api_key or None).embed_query(text)
+            vec = OpenAIEmbeddings(
+                model=settings.embedding_model or "text-embedding-3-small",
+                dimensions=settings.embedding_dim,
+                api_key=settings.openai_api_key or None,
+                base_url=settings.openai_base_url or None,
+            ).embed_query(text)
         return list(vec)[: settings.embedding_dim]
     except Exception:  # embeddings are an enhancement, never a blocker
         return None

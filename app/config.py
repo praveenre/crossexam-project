@@ -8,7 +8,7 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -36,6 +36,10 @@ class Settings(BaseSettings):
     llm_provider: Literal["gemini", "vertex", "openai", "fake"] = "gemini"
     google_api_key: str = ""
     openai_api_key: str = ""
+    openai_base_url: str = Field(
+        default="",
+        validation_alias=AliasChoices("openai_base_url", "openai_api_base", "openai_api_base_url"),
+    )
     gcp_project: str = ""
     gcp_location: str = "us-central1"
 

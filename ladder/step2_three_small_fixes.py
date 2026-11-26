@@ -16,12 +16,17 @@ from typing import Literal
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel
 
-from step1_one_agent import Invoice, read_file  # step 1 stays as it was: we only add to it
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
-MODEL = ChatGoogleGenerativeAI(model=os.environ.get("MODEL_SMALL", "gemini-3.5-flash-lite"))
+from step1_one_agent import Invoice, read_file, _get_model  # step 1 stays as it was: we only add to it
+
+MODEL = _get_model()
 SAVED = os.environ.get("STEP2_RESULTS", "ladder/results.jsonl")   # fix 3: results live in a file, one line per paper
 
 

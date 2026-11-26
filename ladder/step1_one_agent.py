@@ -15,9 +15,27 @@ import pypdfium2 as pdfium
 from langchain.agents import create_agent
 from langchain.agents.structured_output import ToolStrategy
 from langchain_core.messages import HumanMessage
-from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel
 from pypdf import PdfReader
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
+def _get_model():
+    provider = os.environ.get("LLM_PROVIDER", "gemini")
+    model_name = os.environ.get("MODEL_SMALL")
+    if provider == "openai" or os.environ.get("OPENAI_API_KEY"):
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=model_name or "google/gemini-2.5-flash-lite",
+            api_key=os.environ.get("OPENAI_API_KEY") or None,
+            base_url=os.environ.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_API_BASE") or None,
+        )
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    return ChatGoogleGenerativeAI(model=model_name or "gemini-3.5-flash-lite")
 
 
 # The "form" the agent must fill: only what a person would read off an invoice.
@@ -30,7 +48,7 @@ class Invoice(BaseModel):
 
 # The agent: a model, no tools, and a form to fill. That is all "an agent" is at this step.
 agent = create_agent(
-    ChatGoogleGenerativeAI(model=os.environ.get("MODEL_SMALL", "gemini-3.5-flash-lite")),
+    _get_model(),
     tools=[],
     system_prompt="You read business papers. Fill the invoice form from the paper. Copy numbers exactly.",
     response_format=ToolStrategy(Invoice),
